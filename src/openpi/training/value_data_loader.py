@@ -1,5 +1,4 @@
-"""Value function 数据加载器。"""
-
+import multiprocessing
 from collections.abc import Iterator
 import logging
 from pathlib import Path
@@ -10,6 +9,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
+import torch
 
 from openpi.models import model as _model
 
@@ -44,11 +44,15 @@ class ValueDataset(TorchDataset):
         if not self.parquet_files:
             raise ValueError(f"找不到 parquet 文件: {parquet_dir}")
 
+        # 预加载所有parquet数据到内存，避免重复磁盘I/O
+        logger.info("预加载所有parquet数据到内存...")
+        self.episode_data = []
         self.episode_lengths = []
         self.episode_offsets = [0]
 
         for pf in self.parquet_files:
             df = pd.read_parquet(pf)
+            self.episode_data.append(df)  # 缓存到内存
             self.episode_lengths.append(len(df))
             self.episode_offsets.append(self.episode_offsets[-1] + len(df))
 
@@ -115,8 +119,8 @@ class ValueDataset(TorchDataset):
     def __getitem__(self, idx: int) -> dict:
         episode_idx, frame_idx = self._find_episode(idx)
 
-        df = pd.read_parquet(self.parquet_files[episode_idx])
-        row = df.iloc[frame_idx]
+        # 使用预加载的数据，不再重复读取parquet
+        row = self.episode_data[episode_idx].iloc[frame_idx]
 
         image = self._load_image(row["image"])
 
@@ -212,18 +216,33 @@ class ValueDataLoader:
         shuffle: bool = True,
         num_workers: int = 4,
         max_token_len: int = 48,
+        seed: int = 42,
         sharding: jax.sharding.Sharding | None = None,
     ):
         self.dataset = ValueDataset(data_dir, max_token_len=max_token_len)
+        self.seed = seed
+
+        # π0风格的多进程优化
+        mp_context = None
+        if num_workers > 0:
+            mp_context = multiprocessing.get_context("spawn")  # 更稳定的上下文
+
+        # π0风格的随机数生成器
+        generator = torch.Generator()
+        generator.manual_seed(seed)
 
         self._torch_loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
+            multiprocessing_context=mp_context,       # π0优化
+            persistent_workers=num_workers > 0,       # π0优化：保持worker存活
             collate_fn=collate_fn,
+            worker_init_fn=self._worker_init_fn,      # π0优化：worker初始化
             drop_last=True,
-            pin_memory=True,
+            pin_memory=False,                         # 避免CUDA警告
+            generator=generator,                      # π0优化：固定种子
         )
 
         if sharding is None:
@@ -232,6 +251,13 @@ class ValueDataLoader:
                 jax.sharding.PartitionSpec("B"),
             )
         self._sharding = sharding
+
+    def _worker_init_fn(self, worker_id: int):
+        """Worker进程初始化函数，π0风格。"""
+        # 设置每个worker的独立随机种子
+        np.random.seed(self.seed + worker_id)
+        import random
+        random.seed(self.seed + worker_id)
 
     def __len__(self) -> int:
         return len(self._torch_loader)
