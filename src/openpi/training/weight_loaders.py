@@ -73,6 +73,45 @@ class PaliGemmaWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
+@dataclasses.dataclass(frozen=True)
+class ValueModelWeightLoader(WeightLoader):
+    """加载 SigLIP 和 Gemma 3 270M 预训练权重用于 ValueModel。
+    
+    - SigLIP: 从 PaliGemma checkpoint 加载
+    - Gemma 3 270M: 从 Kaggle 加载
+    - ValueHead: 随机初始化
+    """
+    
+    gemma_variant: str = "gemma3-270m"
+
+    def load(self, params: at.Params) -> at.Params:
+        logger.info("加载 SigLIP 权重 (from local checkpoint)...")
+        siglip_path = "/data/train_dataset/checkpoint/siglip2-so400m-patch14-384-jax/siglip2_so400m14_384.npz"
+        with open(siglip_path, "rb") as f:
+            siglip_flat = dict(np.load(f, allow_pickle=False))
+        siglip_params = flax.traverse_util.unflatten_dict(siglip_flat, sep="/")["params"]
+        
+        logger.info("加载 Gemma 3 270M 权重 (from local Orbax checkpoint)...")
+        gemma_checkpoint_dir = "/data/train_dataset/checkpoint/gemma-3-270m"
+        
+        # 使用 Orbax 加载 checkpoint
+        try:
+            from orbax.checkpoint import PyTreeCheckpointer
+            checkpointer = PyTreeCheckpointer()
+            gemma_params = checkpointer.restore(gemma_checkpoint_dir)
+            logger.info("成功加载 Gemma checkpoint")
+        except Exception as e:
+            logger.error(f"Gemma 加载失败: {e}")
+            raise
+        
+        loaded_params = {
+            "img": siglip_params,
+            "llm": gemma_params,
+        }
+        
+        return _merge_params(loaded_params, params, missing_regex=".*value_head.*")
+
+
 def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:
     """Merges the loaded parameters with the reference parameters.
 
