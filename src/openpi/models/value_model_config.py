@@ -33,6 +33,7 @@ class ValueModelConfig(_model.BaseModelConfig):
 
     def create(self, rng: at.KeyArrayLike) -> "ValueModel":
         from openpi.models.value_model import ValueModel
+
         return ValueModel(self, rngs=nnx.Rngs(rng))
 
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:

@@ -2,18 +2,16 @@
 
 from collections.abc import Iterator
 import logging
-import os
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-import torch
-from torch.utils.data import Dataset as TorchDataset, DataLoader
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset as TorchDataset
 
 from openpi.models import model as _model
-from openpi.models.value_model import target_to_twohot, NUM_ATOMS
 
 logger = logging.getLogger("openpi")
 
@@ -45,7 +43,7 @@ class ValueDataset(TorchDataset):
 
         self.episode_lengths = []
         self.episode_offsets = [0]
-        
+
         for pf in self.parquet_files:
             df = pd.read_parquet(pf)
             self.episode_lengths.append(len(df))
@@ -68,12 +66,12 @@ class ValueDataset(TorchDataset):
 
     def __getitem__(self, idx: int) -> dict:
         episode_idx, frame_idx = self._find_episode(idx)
-        
+
         df = pd.read_parquet(self.parquet_files[episode_idx])
         row = df.iloc[frame_idx]
 
         image = self._load_image(row["image"])
-        
+
         wrist_image = None
         if "wrist_image" in row:
             wrist_image = self._load_image(row["wrist_image"])
@@ -81,7 +79,7 @@ class ValueDataset(TorchDataset):
         state = np.array(row["state"], dtype=np.float32)
 
         if "value" not in row:
-            raise ValueError(f"数据中没有 value 字段，请先运行 add_value_labels.py")
+            raise ValueError("数据中没有 value 字段，请先运行 add_value_labels.py")
         value = np.float32(row["value"])
 
         result = {
@@ -104,6 +102,7 @@ class ValueDataset(TorchDataset):
     def _load_image(self, image_data) -> np.ndarray:
         """加载图像数据。"""
         import io
+
         from PIL import Image
 
         if isinstance(image_data, dict) and "bytes" in image_data:
@@ -114,27 +113,22 @@ class ValueDataset(TorchDataset):
             raise ValueError(f"未知的图像格式: {type(image_data)}")
 
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        
+
         if image.size != self.image_size:
             image = image.resize(self.image_size, Image.BILINEAR)
 
         image_array = np.array(image, dtype=np.float32)
-        image_array = image_array / 255.0 * 2.0 - 1.0
+        return image_array / 255.0 * 2.0 - 1.0
 
-        return image_array
 
 
 def collate_fn(batch: list[dict]) -> dict:
     """将 batch 合并为 numpy 数组。"""
     result = {}
-    
-    result["image"] = {
-        key: np.stack([item["image"][key] for item in batch], axis=0)
-        for key in batch[0]["image"]
-    }
+
+    result["image"] = {key: np.stack([item["image"][key] for item in batch], axis=0) for key in batch[0]["image"]}
     result["image_mask"] = {
-        key: np.array([item["image_mask"][key] for item in batch], dtype=bool)
-        for key in batch[0]["image_mask"]
+        key: np.array([item["image_mask"][key] for item in batch], dtype=bool) for key in batch[0]["image_mask"]
     }
     result["state"] = np.stack([item["state"] for item in batch], axis=0)
     result["value"] = np.array([item["value"] for item in batch], dtype=np.float32)
@@ -156,7 +150,7 @@ class ValueDataLoader:
         sharding: jax.sharding.Sharding | None = None,
     ):
         self.dataset = ValueDataset(data_dir, max_token_len=max_token_len)
-        
+
         self._torch_loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
@@ -179,10 +173,7 @@ class ValueDataLoader:
 
     def __iter__(self) -> Iterator[tuple[_model.Observation, jnp.ndarray]]:
         for batch in self._torch_loader:
-            batch_jax = jax.tree.map(
-                lambda x: jax.make_array_from_process_local_data(self._sharding, x),
-                batch
-            )
+            batch_jax = jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
 
             observation = _model.Observation.from_dict(batch_jax)
             value = batch_jax["value"]

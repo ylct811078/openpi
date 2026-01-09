@@ -13,24 +13,20 @@ import argparse
 import dataclasses
 import functools
 import logging
-import platform
 from pathlib import Path
+import platform
 
 import etils.epath as epath
 import flax.nnx as nnx
-import flax.traverse_util as traverse_util
 from flax.training import common_utils
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 
-from openpi.models.value_model import ValueModel
-from openpi.models.value_model_config import ValueModelConfig
 from openpi.models import model as _model
+from openpi.models.value_model_config import ValueModelConfig
 from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.sharding as sharding
 from openpi.training.value_data_loader import ValueDataLoader
 from openpi.training.weight_loaders import ValueModelWeightLoader
@@ -73,7 +69,7 @@ def create_train_state(
     """创建训练状态。"""
     model = config.create(rng)
     params = nnx.state(model)
-    
+
     if load_pretrained:
         logging.info("加载 PaliGemma 预训练权重...")
         loader = ValueModelWeightLoader()
@@ -81,7 +77,7 @@ def create_train_state(
         loaded_params = loader.load(params_dict)
         params.replace_by_pure_dict(loaded_params)
         logging.info("预训练权重加载完成")
-    
+
     model_def = nnx.graphdef(model)
 
     tx = optax.adamw(learning_rate, weight_decay=0.01)
@@ -107,10 +103,9 @@ def train_step(
     model.train()
 
     def loss_fn(model):
-        loss = model.compute_loss(rng, observation, target, train=True)
-        return loss
+        return model.compute_loss(rng, observation, target, train=True)
 
-    train_rng = jax.random.fold_in(rng, state.step)
+    jax.random.fold_in(rng, state.step)
     loss, grads = nnx.value_and_grad(loss_fn)(model)
 
     updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
@@ -136,15 +131,15 @@ def save_checkpoint(state: TrainState, checkpoint_dir: Path, step: int):
     import orbax.checkpoint as ocp
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
+
     ckpt_path = checkpoint_dir / f"step_{step:08d}"
-    
+
     with ocp.PyTreeCheckpointer() as ckptr:
         ckptr.save(
             ckpt_path,
             {"params": state.params.to_pure_dict(), "step": step},
         )
-    
+
     logging.info(f"保存 checkpoint: {ckpt_path}")
 
 
@@ -157,7 +152,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率")
     parser.add_argument("--log_interval", type=int, default=100, help="日志间隔")
     parser.add_argument("--save_interval", type=int, default=1000, help="保存间隔")
-    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--gemma_variant", type=str, default="gemma_270m", help="Gemma 变体")
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")
@@ -166,15 +161,16 @@ def main():
 
     init_logging()
     logging.info(f"Running on: {platform.node()}")
-    
+
     # 配置JAX
     import os
+
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")  # 优先使用CUDA，fallback到CPU
-    
+
     # 设置JAX配置
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
-    
+
     try:
         logging.info(f"JAX devices: {jax.devices()}")
         logging.info(f"JAX default backend: {jax.default_backend()}")
@@ -208,12 +204,26 @@ def main():
     train_state, tx = create_train_state(config, args.learning_rate, init_rng, args.load_pretrained)
     logging.info("模型初始化完成")
 
-    state_sharding = jax.tree.map(lambda _: replicated_sharding, train_state)
+    jax.tree.map(lambda _: replicated_sharding, train_state)
 
     @functools.partial(
         jax.jit,
-        in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, replicated_sharding, replicated_sharding, data_sharding, data_sharding),
-        out_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, replicated_sharding, replicated_sharding),
+        in_shardings=(
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+            data_sharding,
+            data_sharding,
+        ),
+        out_shardings=(
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+            replicated_sharding,
+        ),
         donate_argnums=(0,),
     )
     def jit_train_step(params, model_def, opt_state, step, rng, observation, target):
@@ -226,9 +236,9 @@ def main():
 
     pbar = tqdm.tqdm(range(args.num_train_steps), dynamic_ncols=True)
     infos = []
-    
+
     data_iter = iter(data_loader)
-    
+
     for step in pbar:
         try:
             observation, value = next(data_iter)
@@ -238,8 +248,13 @@ def main():
 
         with sharding.set_mesh(mesh):
             new_params, new_model_def, new_opt_state, new_step, info = jit_train_step(
-                train_state.params, train_state.model_def, train_state.opt_state, train_state.step,
-                train_rng, observation, value
+                train_state.params,
+                train_state.model_def,
+                train_state.opt_state,
+                train_state.step,
+                train_rng,
+                observation,
+                value,
             )
             train_state = TrainState(
                 step=new_step,
@@ -247,7 +262,7 @@ def main():
                 model_def=new_model_def,
                 opt_state=new_opt_state,
             )
-        
+
         infos.append(info)
 
         if step % args.log_interval == 0 and step > 0:

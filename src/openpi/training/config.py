@@ -63,10 +63,10 @@ class AssetsConfig:
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
-    #repo_id: str | None = None
+    # repo_id: str | None = None
     repo_id: str = "lerobot/aloha_mobile_cabinet"
     # Local data directory. If set, data will be loaded from this directory instead of downloading from repo_id.
-    local_data_dir: str ="/app/datasets/pick_put"
+    local_data_dir: str = "/app/datasets/pick_put"
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -168,10 +168,10 @@ class ModelTransformFactory(GroupFactory):
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
-    #repo_id: str = tyro.MISSING
+    # repo_id: str = tyro.MISSING
     repo_id: str = "lerobot/aloha_mobile_cabinet"
     # Local data directory. If set, data will be loaded from this directory instead of downloading from repo_id.
-    local_data_dir: str ="/app/datasets/pick_put"
+    local_data_dir: str = "/app/datasets/pick_put"
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -576,7 +576,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
-            default_prompt="pick and put",#自己添加的prompt
+            default_prompt="pick and put",  # 自己添加的prompt
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),

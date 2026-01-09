@@ -20,6 +20,7 @@ V_MIN = -1.0
 V_MAX = 0.0
 DELTA_Z = (V_MAX - V_MIN) / (NUM_ATOMS - 1)
 
+
 def get_supports():
     """Get the support values for C51 distributional RL."""
     return jnp.linspace(V_MIN, V_MAX, NUM_ATOMS)
@@ -36,40 +37,39 @@ def make_attn_mask(input_mask, mask_ar):
 
 def target_to_twohot(target_values: jnp.ndarray) -> jnp.ndarray:
     """Convert target values to two-hot distribution using linear interpolation.
-    
+
     Args:
         target_values: Target values in range [V_MIN, V_MAX], shape [batch].
-        
+
     Returns:
         Two-hot target distribution, shape [batch, NUM_ATOMS].
     """
     target_values = jnp.clip(target_values, V_MIN, V_MAX)
-    
+
     b_left = jnp.floor((target_values - V_MIN) / DELTA_Z).astype(jnp.int32)
     b_left = jnp.clip(b_left, 0, NUM_ATOMS - 2)
     b_right = b_left + 1
-    
+
     z_left = V_MIN + b_left.astype(jnp.float32) * DELTA_Z
-    
+
     weight_right = (target_values - z_left) / DELTA_Z
     weight_left = 1.0 - weight_right
-    
+
     batch_size = target_values.shape[0]
     target_dist = jnp.zeros((batch_size, NUM_ATOMS))
-    
+
     batch_idx = jnp.arange(batch_size)
     target_dist = target_dist.at[batch_idx, b_left].set(weight_left)
-    target_dist = target_dist.at[batch_idx, b_right].set(weight_right)
-    
-    return target_dist
+    return target_dist.at[batch_idx, b_right].set(weight_right)
+
 
 
 def dist_to_value(logits: jnp.ndarray) -> jnp.ndarray:
     """Convert distribution logits to expected value.
-    
+
     Args:
         logits: Distribution logits, shape [batch, NUM_ATOMS].
-        
+
     Returns:
         Expected value, shape [batch].
     """
@@ -94,8 +94,7 @@ class ValueHead(nnx.Module):
         # 简化：训练时不使用 dropout，避免状态管理复杂性
         # if train and self.dropout_rate > 0:
         #     x = nnx.dropout(x, rate=self.dropout_rate, deterministic=False)
-        x = self.linear2(x)
-        return x
+        return self.linear2(x)
 
 
 class ValueModel(nnx.Module):
@@ -114,7 +113,7 @@ class ValueModel(nnx.Module):
                 dtype_mm=config.dtype,
             )
         )
-        
+
         # 添加投影层将SigLIP的2048维投影到Gemma的640维
         self.img_projection = nnx.Linear(2048, gemma_config.width, rngs=rngs)
 
@@ -176,15 +175,13 @@ class ValueModel(nnx.Module):
 
         return tokens, input_mask, ar_mask
 
-    def __call__(
-        self, observation: _model.Observation, *, train: bool = False
-    ) -> at.Float[at.Array, "b num_atoms"]:
+    def __call__(self, observation: _model.Observation, *, train: bool = False) -> at.Float[at.Array, "b num_atoms"]:
         """Forward pass to compute value distribution logits.
-        
+
         Args:
             observation: Input observation containing images and optional text.
             train: Whether in training mode.
-            
+
         Returns:
             Value distribution logits of shape [batch, NUM_ATOMS].
         """
@@ -199,8 +196,7 @@ class ValueModel(nnx.Module):
         batch_idx = jnp.arange(out[0].shape[0])
         pooled = out[0][batch_idx, last_token_idx]
 
-        logits = self.value_head(pooled, train=train)
-        return logits
+        return self.value_head(pooled, train=train)
 
     def compute_value(
         self,
@@ -210,12 +206,12 @@ class ValueModel(nnx.Module):
         train: bool = False,
     ) -> at.Float[at.Array, " b"]:
         """Compute expected value from distribution.
-        
+
         Args:
             rng: Random key for preprocessing.
             observation: Input observation.
             train: Whether in training mode.
-            
+
         Returns:
             Expected value of shape [batch].
         """
@@ -234,13 +230,13 @@ class ValueModel(nnx.Module):
         train: bool = False,
     ) -> at.Float[at.Array, ""]:
         """Compute cross-entropy loss between predicted distribution and two-hot target.
-        
+
         Args:
             rng: Random key for preprocessing.
             observation: Input observation.
             target: Either scalar values [batch] or two-hot distribution [batch, 201].
             train: Whether in training mode.
-            
+
         Returns:
             Scalar cross-entropy loss.
         """
@@ -248,13 +244,10 @@ class ValueModel(nnx.Module):
         available_keys = list(observation.images.keys())
         observation = _model.preprocess_observation(rng, observation, train=train, image_keys=available_keys)
         logits = self(observation, train=train)
-        
-        if target.ndim == 1:
-            target_dist = target_to_twohot(target)
-        else:
-            target_dist = target
-        
+
+        target_dist = target_to_twohot(target) if target.ndim == 1 else target
+
         log_probs = jax.nn.log_softmax(logits, axis=-1)
         loss = -jnp.sum(target_dist * log_probs, axis=-1)
-        
+
         return jnp.mean(loss)
