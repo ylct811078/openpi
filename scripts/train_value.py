@@ -168,6 +168,37 @@ def train_step(
     return new_state, info
 
 
+def load_checkpoint(checkpoint_path: Path, state: TrainState) -> TrainState:
+    """从 checkpoint 恢复训练状态。"""
+    import orbax.checkpoint as ocp
+    
+    if not checkpoint_path.exists():
+        raise ValueError(f"Checkpoint 不存在: {checkpoint_path}")
+    
+    with ocp.PyTreeCheckpointer() as ckptr:
+        restored = ckptr.restore(str(checkpoint_path))
+    
+    # 恢复参数
+    state.params.replace_by_pure_dict(restored["params"])
+    
+    # 恢复 EMA 参数（如果存在）
+    if "ema_params" in restored and state.ema_params is not None:
+        state.ema_params.replace_by_pure_dict(restored["ema_params"])
+    
+    # 恢复步数
+    restored_step = int(restored["step"])
+    state = TrainState(
+        step=restored_step,
+        params=state.params,
+        model_def=state.model_def,
+        opt_state=state.opt_state,
+        ema_params=state.ema_params,
+    )
+    
+    logging.info(f"从 checkpoint 恢复: {checkpoint_path}, step={restored_step}")
+    return state
+
+
 def save_checkpoint(state: TrainState, checkpoint_dir: Path, step: int):
     """保存 checkpoint。"""
     import orbax.checkpoint as ocp
@@ -206,6 +237,7 @@ def main():
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")
     parser.add_argument("--fsdp_devices", type=int, default=1, help="FSDP设备数量，>1启用模型并行")
     parser.add_argument("--load_pretrained", action="store_true", help="加载 PaliGemma 预训练权重")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="从指定checkpoint恢复训练（例如：step_00001000）")
     args = parser.parse_args()
 
     init_logging()
@@ -254,7 +286,7 @@ def main():
     )
 
     logging.info("初始化数据加载器...")
-    # π0风格：增加batch size以提高GPU利用率
+    # 增加batch size以提高GPU利用率
     effective_batch_size = args.batch_size * max(1, available_devices // args.fsdp_devices)
     logging.info(f"原始batch size: {args.batch_size}, 有效batch size: {effective_batch_size}")
     
@@ -275,8 +307,14 @@ def main():
     logging.info("初始化模型...")
     train_state, tx = create_train_state(config, args.num_train_steps, init_rng, args.load_pretrained)
     logging.info("模型初始化完成")
+    
+    # 从检查点恢复（如果指定）
+    if args.resume_from_checkpoint:
+        checkpoint_path = Path(args.checkpoint_dir) / args.resume_from_checkpoint
+        train_state = load_checkpoint(checkpoint_path, train_state)
+        logging.info(f"从 step {train_state.step} 继续训练")
 
-    # π0风格：将模型参数分片到多GPU
+    # 将模型参数分片到多GPU
     if args.fsdp_devices > 1:
         logging.info("应用FSDP分片到模型参数...")
         with sharding.set_mesh(mesh):
@@ -330,7 +368,10 @@ def main():
     checkpoint_dir = Path(args.checkpoint_dir).resolve()  # 确保绝对路径
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    pbar = tqdm.tqdm(range(args.num_train_steps), dynamic_ncols=True)
+    # 从恢复的步数开始训练
+    start_step = train_state.step
+    total_steps = args.num_train_steps
+    pbar = tqdm.tqdm(range(start_step, total_steps), initial=start_step, total=total_steps, dynamic_ncols=True)
     infos = []
 
     # π0风格：数据预取和GPU利用率优化

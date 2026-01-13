@@ -54,31 +54,14 @@ class CheckpointWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*lora.*")
 
 
-@dataclasses.dataclass(frozen=True)
-class PaliGemmaWeightLoader(WeightLoader):
-    """Loads weights from the official PaliGemma checkpoint.
-
-    This will overwrite existing weights with similar names while keeping all extra weights intact.
-    This allows us to support the action expert which is used by the Pi0 model.
-    """
-
-    def load(self, params: at.Params) -> at.Params:
-        path = download.maybe_download(
-            "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz", gs={"token": "anon"}
-        )
-        with path.open("rb") as f:
-            flat_params = dict(np.load(f, allow_pickle=False))
-        loaded_params = {"PaliGemma": flax.traverse_util.unflatten_dict(flat_params, sep="/")["params"]}
-        # Add all missing weights.
-        return _merge_params(loaded_params, params, missing_regex=".*")
 
 
 @dataclasses.dataclass(frozen=True)
 class ValueModelWeightLoader(WeightLoader):
     """加载 SigLIP 和 Gemma 3 270M 预训练权重用于 ValueModel。
 
-    - SigLIP: 从 PaliGemma checkpoint 加载
-    - Gemma 3 270M: 从 Kaggle 加载
+    - SigLIP: 
+    - Gemma 3 270M: 
     - ValueHead: 随机初始化
     """
 
