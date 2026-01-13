@@ -230,10 +230,16 @@ def main():
     rng = jax.random.key(args.seed)
     train_rng, init_rng = jax.random.split(rng)
 
-    # π0风格多GPU配置
-    logging.info(f"可用设备数: {jax.device_count()}, FSDP设备数: {args.fsdp_devices}")
-    if jax.device_count() % args.fsdp_devices != 0:
-        raise ValueError(f"设备数 {jax.device_count()} 必须能被FSDP设备数 {args.fsdp_devices} 整除")
+    # π0风格多GPU配置 - 自动使用所有可用GPU
+    available_devices = jax.device_count()
+    # 如果用户没有指定fsdp_devices，自动使用所有GPU
+    if args.fsdp_devices == 1 and available_devices > 1:
+        args.fsdp_devices = available_devices
+        logging.info(f"自动调整：使用所有 {available_devices} 个GPU进行FSDP")
+    
+    logging.info(f"可用设备数: {available_devices}, FSDP设备数: {args.fsdp_devices}")
+    if available_devices % args.fsdp_devices != 0:
+        raise ValueError(f"设备数 {available_devices} 必须能被FSDP设备数 {args.fsdp_devices} 整除")
     
     mesh = sharding.make_mesh(num_fsdp_devices=args.fsdp_devices)
     logging.info(f"Mesh形状: {mesh.shape}, 轴: {mesh.axis_names}")
@@ -249,16 +255,21 @@ def main():
 
     logging.info("初始化数据加载器...")
     # π0风格：增加batch size以提高GPU利用率
-    effective_batch_size = args.batch_size * max(1, jax.device_count() // args.fsdp_devices)
+    effective_batch_size = args.batch_size * max(1, available_devices // args.fsdp_devices)
     logging.info(f"原始batch size: {args.batch_size}, 有效batch size: {effective_batch_size}")
+    
+    # 调整worker数量，避免过多worker导致的问题
+    max_workers = min(6, max(1, args.num_workers))  # 系统建议最大6个worker
     
     data_loader = ValueDataLoader(
         args.data_dir,
         batch_size=effective_batch_size,  # 使用更大的有效batch size
         shuffle=True,
-        num_workers=max(8, args.num_workers),  # 至少8个worker
-        sharding=data_sharding,
+        num_workers=max_workers,  # 使用调整后的worker数量
+        sharding=None,  # 先不传递sharding，避免序列化问题
     )
+    # 初始化后设置sharding，避免多进程序列化问题
+    data_loader.set_sharding(data_sharding)
     logging.info(f"数据集大小: {len(data_loader.dataset)} 帧")
 
     logging.info("初始化模型...")
@@ -277,7 +288,11 @@ def main():
         logging.info("FSDP分片完成")
     else:
         # 单卡：复制到所有设备
-        train_state = jax.tree_map(lambda x: jax.device_put(x, replicated_sharding), train_state)
+        train_state = jax.tree_map(
+            lambda x: jax.device_put(x, replicated_sharding), 
+            train_state,
+            is_leaf=lambda x: hasattr(x, 'shape')
+        )
 
     @functools.partial(
         jax.jit,

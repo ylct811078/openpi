@@ -77,8 +77,9 @@ class ValueDataset(TorchDataset):
         
         logger.info(f"加载了 {len(self.task_texts)} 个任务文本")
         
-        # 初始化 Gemma3 tokenizer（借鉴 Pi0 方式但使用 Gemma3）
-        self._init_gemma3_tokenizer()
+        # 不在这里初始化 tokenizer，延迟到实际使用时
+        self.tokenizer = None
+        self.tokenizer_path = "/public/home/wangsenbao/Robotic_Project/checkpoint/tokenizer.model"
 
     def _init_gemma3_tokenizer(self):
         """初始化 Gemma3 tokenizer（使用本地文件）"""
@@ -97,6 +98,10 @@ class ValueDataset(TorchDataset):
 
     def _tokenize_text(self, text: str) -> tuple[np.ndarray, np.ndarray]:
         """使用 Gemma3 tokenizer 进行文本tokenization（按照 Pi0 方式）"""
+        # 延迟初始化 tokenizer（在每个 worker 进程中独立初始化）
+        if self.tokenizer is None:
+            self._init_gemma3_tokenizer()
+        
         # 添加Value:后缀，明确这是价值估计任务
         text_with_suffix = f"{text}\nValue:"
         
@@ -215,6 +220,14 @@ def collate_fn(batch: list[dict]) -> dict:
     return result
 
 
+def worker_init_fn_impl(worker_id: int, seed: int):
+    """Worker进程初始化函数，π0风格。"""
+    # 设置每个worker的独立随机种子
+    np.random.seed(seed + worker_id)
+    import random
+    random.seed(seed + worker_id)
+
+
 class ValueDataLoader:
     """价值函数数据加载器。"""
 
@@ -240,6 +253,8 @@ class ValueDataLoader:
         # π0风格的随机数生成器
         generator = torch.Generator()
         generator.manual_seed(seed)
+        
+        import functools
 
         self._torch_loader = DataLoader(
             self.dataset,
@@ -249,26 +264,15 @@ class ValueDataLoader:
             multiprocessing_context=mp_context,       # π0优化
             persistent_workers=num_workers > 0,       # π0优化：保持worker存活
             collate_fn=collate_fn,
-            worker_init_fn=self._worker_init_fn,      # π0优化：worker初始化
+            worker_init_fn=functools.partial(worker_init_fn_impl, seed=seed), # π0优化：worker初始化
             drop_last=True,
             pin_memory=False,                         # 避免CUDA警告
             generator=generator,                      # π0优化：固定种子
             prefetch_factor=4 if num_workers > 0 else None,  # 修复：只在多进程时使用prefetch_factor
         )
 
-        if sharding is None:
-            sharding = jax.sharding.NamedSharding(
-                jax.sharding.Mesh(jax.devices(), ("B",)),
-                jax.sharding.PartitionSpec("B"),
-            )
+        # 延迟初始化sharding，避免多进程序列化问题
         self._sharding = sharding
-
-    def _worker_init_fn(self, worker_id: int):
-        """Worker进程初始化函数，π0风格。"""
-        # 设置每个worker的独立随机种子
-        np.random.seed(self.seed + worker_id)
-        import random
-        random.seed(self.seed + worker_id)
 
     def __len__(self) -> int:
         return len(self._torch_loader)
@@ -279,7 +283,18 @@ class ValueDataLoader:
 
     def __iter__(self) -> Iterator[tuple[_model.Observation, jnp.ndarray]]:
         for batch in self._torch_loader:
-            batch_jax = jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
+            # 如果没有设置sharding，使用默认的单设备sharding
+            if self._sharding is None:
+                # 创建临时的默认sharding（在__iter__中，不会被序列化）
+                default_sharding = jax.sharding.NamedSharding(
+                    jax.sharding.Mesh(jax.devices(), ("B",)),
+                    jax.sharding.PartitionSpec("B"),
+                )
+                sharding_to_use = default_sharding
+            else:
+                sharding_to_use = self._sharding
+                
+            batch_jax = jax.tree.map(lambda x: jax.make_array_from_process_local_data(sharding_to_use, x), batch)
 
             observation = _model.Observation.from_dict(batch_jax)
             value = batch_jax["value"]
