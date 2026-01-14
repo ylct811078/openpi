@@ -95,7 +95,8 @@ class ValueModelWeightLoader(WeightLoader):
             "llm": gemma_params,
         }
 
-        return _merge_params(loaded_params, params, missing_regex=".*value_head.*")
+        # 匹配 value_head, img_projection, cross_attention, cross_attn_norm
+        return _merge_params(loaded_params, params, missing_regex=".*(value_head|img_projection|cross_att).*")
 
 
 def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:

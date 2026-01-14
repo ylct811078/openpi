@@ -172,6 +172,9 @@ def load_checkpoint(checkpoint_path: Path, state: TrainState) -> TrainState:
     """从 checkpoint 恢复训练状态。"""
     import orbax.checkpoint as ocp
     
+    # 确保使用绝对路径
+    checkpoint_path = checkpoint_path.resolve()
+    
     if not checkpoint_path.exists():
         raise ValueError(f"Checkpoint 不存在: {checkpoint_path}")
     
@@ -231,7 +234,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率")
     parser.add_argument("--log_interval", type=int, default=100, help="日志间隔")
     parser.add_argument("--save_interval", type=int, default=1000, help="保存间隔")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--gemma_variant", type=str, default="gemma_270m", help="Gemma 变体")
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")

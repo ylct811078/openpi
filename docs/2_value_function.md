@@ -37,7 +37,7 @@
          v             +--------+---------+
 +------------------+         |
 | Gemma3 Embedder  |         | (Query来自文本)
-| (冻结预训练权重)  |         |
+| (冻结权重)        |         |
 +--------+---------+         v
          |             +------------------+
          |             |  增强的文本特征   |
@@ -47,6 +47,14 @@
                                 v
                        +------------------+
                        | 拼接图像+文本特征 |
+                       | [B, seq_total, 640]
+                       +--------+---------+
+                                |
+                                | 输入 Backbone (Deep Fusion)
+                                v
+                       +------------------+
+                       | Gemma Transformer|
+                       |     (18 Layers)  |
                        | [B, seq_total, 640]
                        +--------+---------+
                                 |
@@ -65,33 +73,23 @@
                        +------------------+
 ```
 
-### 交叉注意力机制详解
+### 交叉注意力与深层融合详解
 
-**核心思想**: 让文本特征能够"关注"图像中的重要区域，实现真正的多模态融合。
+**1. 交叉注意力 (Cross-Attention)**:
+- 文本特征作为 Query，图像特征作为 Key/Value。
+- 让文本 Token 能够"关注"并聚合相关的图像区域特征。
+- 此时特征仅进行了初步的模态交互。
 
-```python
-# 交叉注意力计算流程
-text_tokens_normed = LayerNorm(text_tokens)        # [B, seq_text, 640]
+**2. 深层融合 (Deep Fusion via Backbone)**:
+- 将拼接后的 [图像 + 文本] 序列送入 **Gemma Transformer Backbone**。
+- 经过 **18 层** Transformer Block 的深层处理。
+- 允许图像和文本信息在深层语义空间中进行复杂的推理和交互。
+- 相比仅使用 Embedder 的浅层模型，具有更强的理解和泛化能力。
 
-attended_text = MultiHeadAttention(
-    query=text_tokens_normed,   # 文本作为 Query
-    key=image_tokens,            # 图像作为 Key
-    value=image_tokens,          # 图像作为 Value
-)                                # [B, seq_text, 640]
-
-# 残差连接
-text_tokens = text_tokens + attended_text
-```
-
-**注意力权重解释**:
-- 对于每个文本 token，计算它与所有图像 token 的相似度
-- 根据相似度加权聚合图像特征
-- 文本 token 获得了"看到"相关图像区域的能力
-
-**示例**: 
-- 文本: "Plug the cable into the socket"
-- 图像: 包含电缆、插座、机械臂等
-- 注意力效果: "cable" token 会更关注图像中电缆的区域，"socket" token 会更关注插座区域
+**3. 冻结 Embedder (Frozen Embedder)**:
+- 文本 Embedder 权重被**冻结** (Stop Gradient)。
+- 防止在小数据集上微调时破坏预训练的词汇语义空间。
+- 保持大模型的通用语言理解能力。
 
 ## C51 分布式价值函数
 
@@ -147,31 +145,21 @@ $$Value = \sum_{i=0}^{200} \text{Softmax}(L_{pred})^{(i)} \cdot z_i$$
 ### 新增文件
 
 1. **`src/openpi/models/value_model.py`**
-   - `NUM_ATOMS, V_MIN, V_MAX, DELTA_Z, SUPPORTS`：C51 常量
-   - `target_to_twohot()`：目标值转 two-hot 分布
-   - `dist_to_value()`：分布 logits 转期望值
-   - `ValueModel` 类：模型主体实现
-   - `embed_tokens()`：将图像和文本编码为 token 序列
-   - `compute_value()`：计算期望价值
-   - `compute_loss()`：计算交叉熵损失
+   - `GemmaBlockRunner` 类：继承 Gemma3，支持 Continuous Embeddings 输入以运行 Backbone。
+   - `ValueModel` 类：集成了 SigLIP, Gemma Embedder (Frozen), Cross-Attention, Gemma Backbone, Value Head。
+   - `NUM_ATOMS, V_MIN, V_MAX`等：C51 分布式 RL 常量。
+   - 核心逻辑：`embed_tokens` 中实现了 `Stop Gradient` (冻结) 和 `Backbone` 调用。
 
 2. **`src/openpi/models/value_model_config.py`**
    - `ValueModelConfig`：配置类
 
 ### 修改的文件
 
-1. **`src/openpi/models/gemma.py`**
-   - 添加 `gemma_270m` 配置：
-     ```python
-     Config(
-         width=640,
-         depth=18,
-         mlp_dim=2048,
-         num_heads=4,
-         num_kv_heads=1,
-         head_dim=256,
-     )
-     ```
+1. **`src/openpi/training/weight_loaders.py`**
+   - 修复参数加载正则 BUG：`missing_regex=".*(value_head|img_projection|cross_att).*"`，确保新层权重不被丢弃。
+
+2. **`src/openpi/models/gemma.py`**
+   - 添加 `gemma_270m` 配置。
 
 ## 模型参数
 
